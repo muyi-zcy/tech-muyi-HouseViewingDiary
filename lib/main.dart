@@ -676,6 +676,7 @@ class RootPage extends StatefulWidget {
 
 class _RootPageState extends State<RootPage> {
   int _index = 0;
+  final GlobalKey<_StatsPageState> _statsPageKey = GlobalKey<_StatsPageState>();
   final GlobalKey<_MapPageState> _mapPageKey = GlobalKey<_MapPageState>();
 
   @override
@@ -687,7 +688,7 @@ class _RootPageState extends State<RootPage> {
           index: _index,
           children: [
             const HomePage(),
-            const StatsPage(),
+            StatsPage(key: _statsPageKey),
             MapPage(key: _mapPageKey),
           ],
         ),
@@ -696,6 +697,9 @@ class _RootPageState extends State<RootPage> {
         selectedIndex: _index,
         onDestinationSelected: (value) {
           setState(() => _index = value);
+          if (value == 1) {
+            _statsPageKey.currentState?.refresh();
+          }
           if (value == 2) {
             _mapPageKey.currentState?.refreshMapData();
           }
@@ -2557,7 +2561,7 @@ class _AddViewingHistoryPageState extends State<AddViewingHistoryPage> with Tick
   }
 }
 
-enum _PickerField { building, totalUnits, totalFloors, bedrooms, livingRooms, bathrooms }
+enum _PickerField { totalUnits, totalFloors, bedrooms, livingRooms, bathrooms }
 
 class EditPage extends StatefulWidget {
   const EditPage({super.key, this.item});
@@ -2710,7 +2714,6 @@ class _EditPageState extends State<EditPage> {
   List<String> _optionsFor(_PickerField f) {
     List<int> range(int a, int b) => [for (var i = a; i <= b; i++) i];
     switch (f) {
-      case _PickerField.building:
       case _PickerField.totalUnits:
         return range(1, 20).map((e) => '$e').toList();
       case _PickerField.totalFloors:
@@ -2726,8 +2729,6 @@ class _EditPageState extends State<EditPage> {
 
   String? _currentPickerValue(_PickerField f) {
     switch (f) {
-      case _PickerField.building:
-        return _building.text;
       case _PickerField.totalUnits:
         return _totalUnits.text;
       case _PickerField.totalFloors:
@@ -2743,9 +2744,6 @@ class _EditPageState extends State<EditPage> {
 
   void _setPickerValue(_PickerField f, String v) {
     switch (f) {
-      case _PickerField.building:
-        _building.text = v;
-        break;
       case _PickerField.totalUnits:
         _totalUnits.text = v;
         break;
@@ -3364,11 +3362,19 @@ class _EditPageState extends State<EditPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Expanded(
-                        child: _selectRow(
-                          label: '楼栋',
-                          value: _building.text,
-                          placeholder: '请选择楼栋',
-                          onTap: () => _openPicker(_PickerField.building, '楼栋'),
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _fieldLabel('楼栋'),
+                              TextFormField(
+                                controller: _building,
+                                decoration: _fieldDeco(hint: '如：1、A栋'),
+                                onChanged: (_) => setState(() {}),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -3771,13 +3777,38 @@ class _StatsWechatArticlePageState extends State<StatsWechatArticlePage> {
   }
 }
 
-class StatsPage extends StatelessWidget {
+class StatsPage extends StatefulWidget {
   const StatsPage({super.key});
+
+  @override
+  State<StatsPage> createState() => _StatsPageState();
+}
+
+class _StatsPageState extends State<StatsPage> {
+  late Future<List<HouseViewing>> _loadFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadFuture = HouseViewingStore.readAll();
+  }
+
+  /// 底部切换至统计 Tab 或下拉刷新时重新拉取本地数据，避免与看房列表不同步。
+  void refresh() {
+    setState(() {
+      _loadFuture = HouseViewingStore.readAll();
+    });
+  }
+
+  Future<void> _onPullRefresh() async {
+    refresh();
+    await _loadFuture;
+  }
 
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<List<HouseViewing>>(
-      future: HouseViewingStore.readAll(),
+      future: _loadFuture,
       builder: (context, snapshot) {
         if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
         final data = snapshot.data!;
@@ -3793,27 +3824,31 @@ class StatsPage extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
-                  children: [
-                    Text('总记录：$total', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
-                    const SizedBox(height: 12),
-                    for (final s in ViewStatus.values)
-                      Container(
-                        margin: const EdgeInsets.only(bottom: 12),
-                        decoration: _neuOuter(),
-                        child: Container(
-                          decoration: _neuInner(),
-                          child: ListTile(
-                            leading: CircleAvatar(backgroundColor: s.bgColor, child: Icon(Icons.pie_chart, color: s.color, size: 18)),
-                            title: Text(s.label),
-                            trailing: Text('${counts[s] ?? 0}', style: const TextStyle(fontWeight: FontWeight.w700)),
+                child: RefreshIndicator(
+                  onRefresh: _onPullRefresh,
+                  child: ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+                    children: [
+                      Text('总记录：$total', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 12),
+                      for (final s in ViewStatus.values)
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 12),
+                          decoration: _neuOuter(),
+                          child: Container(
+                            decoration: _neuInner(),
+                            child: ListTile(
+                              leading: CircleAvatar(backgroundColor: s.bgColor, child: Icon(Icons.pie_chart, color: s.color, size: 18)),
+                              title: Text(s.label),
+                              trailing: Text('${counts[s] ?? 0}', style: const TextStyle(fontWeight: FontWeight.w700)),
+                            ),
                           ),
                         ),
-                      ),
-                    const SizedBox(height: 16),
-                    Text('成功率（已定/总记录）：${total == 0 ? 0 : ((counts[ViewStatus.booked]! / total) * 100).round()}%'),
-                  ],
+                      const SizedBox(height: 16),
+                      Text('成功率（已定/总记录）：${total == 0 ? 0 : ((counts[ViewStatus.booked]! / total) * 100).round()}%'),
+                    ],
+                  ),
                 ),
               ),
               Material(
