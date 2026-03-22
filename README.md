@@ -29,6 +29,13 @@
 | `path_provider` | 本地文件路径 |
 | `url_launcher` | 拨号、打开链接 |
 
+## 🎨 应用图标与 Logo
+
+- 资源路径：`assets/images/logo.jpg`（首页标题旁展示）
+- 更新桌面图标：修改该图后执行  
+  `dart run flutter_launcher_icons`  
+  会按 `pubspec.yaml` 中的 `flutter_launcher_icons` 配置生成 Android / iOS 启动图标。
+
 ## 📋 环境要求
 
 - Flutter SDK ^3.10.8

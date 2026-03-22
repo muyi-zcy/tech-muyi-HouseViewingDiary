@@ -1,4 +1,4 @@
-package com.example.house_viewing_diary_flutter
+package cn.ideaistudio
 
 import io.flutter.embedding.android.FlutterActivity
 

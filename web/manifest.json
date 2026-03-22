@@ -1,11 +1,11 @@
 {
-    "name": "house_viewing_diary_flutter",
-    "short_name": "house_viewing_diary_flutter",
+    "name": "看房日记",
+    "short_name": "看房日记",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "看房记录管理应用",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

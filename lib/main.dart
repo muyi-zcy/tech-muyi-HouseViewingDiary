@@ -112,7 +112,7 @@ class HouseViewingDiaryApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '看房日记 Flutter',
+      title: '看房日记',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: _primary),
         useMaterial3: true,
@@ -833,7 +833,25 @@ class _HomePageState extends State<HomePage> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 120),
           children: [
-            const Text('看房日记', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800, color: _textPrimary)),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.asset(
+                    'assets/images/logo.jpg',
+                    width: 48,
+                    height: 48,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox(width: 48, height: 48),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                const Expanded(
+                  child: Text('看房日记', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800, color: _textPrimary)),
+                ),
+              ],
+            ),
             const SizedBox(height: 4),
             const Text('记录每一次看房的点点滴滴', style: TextStyle(color: _textSecondary, fontSize: 14)),
             const SizedBox(height: 20),

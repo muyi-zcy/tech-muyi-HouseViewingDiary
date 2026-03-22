@@ -4,7 +4,7 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <application
-        android:label="house_viewing_diary_flutter"
+        android:label="看房日记"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
