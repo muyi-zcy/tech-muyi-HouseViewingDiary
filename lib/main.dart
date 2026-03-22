@@ -10,6 +10,7 @@ import 'package:house_viewing_diary_flutter/amap/amap_config.dart';
 import 'package:house_viewing_diary_flutter/amap/current_location.dart';
 import 'package:house_viewing_diary_flutter/amap/amap_web_page.dart';
 import 'package:house_viewing_diary_flutter/amap/webview_init_stub.dart' if (dart.library.html) 'package:house_viewing_diary_flutter/amap/webview_init_web.dart' as webview_init;
+import 'package:house_viewing_diary_flutter/listing_share_parser.dart';
 import 'package:house_viewing_diary_flutter/file_image_widget.dart';
 import 'package:house_viewing_diary_flutter/local_media_preview.dart';
 import 'package:house_viewing_diary_flutter/voice_note_dir_stub.dart'
@@ -2599,6 +2600,7 @@ class _EditPageState extends State<EditPage> {
   List<String> _selectedTags = [];
   List<String> _mediaUris = [];
   bool _saving = false;
+  bool _shareParsing = false;
   bool _hasChanges = false;
 
   static const _inputBorderSide = BorderSide(color: Color(0x99FFFFFF));
@@ -2856,71 +2858,118 @@ class _EditPageState extends State<EditPage> {
     return '${unit.round().toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (m) => '${m[1]},')} 元/㎡';
   }
 
-  void _applyShareParse() {
+  Future<void> _applyShareParse() async {
     final text = _shareContent.text.trim();
     if (text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先粘贴分享内容或链接')));
       return;
     }
-    final link = RegExp(r'https?://[^\s]+').firstMatch(text)?.group(0);
-    if (link != null) _sourceUrl.text = link;
+    setState(() => _shareParsing = true);
+    try {
+      final fields = await parseListingShareWithOptionalWeb(text);
 
-    String? pick(RegExp re) => re.firstMatch(text)?.group(1)?.trim();
+      if (fields.community != null && fields.community!.isNotEmpty) {
+        _community.text = fields.community!;
+      }
+      if (fields.price != null && fields.price!.isNotEmpty) {
+        _price.text = fields.price!;
+      }
+      if (fields.area != null && fields.area!.isNotEmpty) {
+        _area.text = fields.area!;
+      }
+      if (fields.bedrooms != null) {
+        _bedrooms.text = '${fields.bedrooms}';
+      }
+      if (fields.livingRooms != null) {
+        _living.text = '${fields.livingRooms}';
+      }
+      if (fields.bathrooms != null) {
+        _bath.text = '${fields.bathrooms}';
+      }
+      if (fields.totalFloors != null) {
+        _totalFloors.text = '${fields.totalFloors}';
+      }
+      if (fields.sourceUrl != null && fields.sourceUrl!.isNotEmpty) {
+        _sourceUrl.text = fields.sourceUrl!;
+      }
+      if (fields.address != null && fields.address!.isNotEmpty) {
+        _address.text = fields.address!;
+      }
+      if (fields.locationHint != null && fields.locationHint!.isNotEmpty && _locationText.text.trim().isEmpty) {
+        _locationText.text = fields.locationHint!;
+      }
 
-    final community = pick(RegExp(r'(?:小区|楼盘|项目|房源)\s*[:：]\s*([^\n，,。；;]{2,30})', caseSensitive: false)) ??
-        pick(RegExp(r'【([^】]{2,30})】'));
-    if (community != null && community.isNotEmpty) _community.text = community;
+      void setIfEmpty(String key, String value) {
+        switch (key) {
+          case 'community':
+            if (_community.text.trim().isEmpty) _community.text = value;
+            break;
+          case 'building':
+            if (_building.text.trim().isEmpty) _building.text = value;
+            break;
+          case 'totalUnits':
+            if (_totalUnits.text.trim().isEmpty) _totalUnits.text = value;
+            break;
+          case 'room':
+            if (_room.text.trim().isEmpty) _room.text = value;
+            break;
+          case 'totalFloors':
+            if (_totalFloors.text.trim().isEmpty) _totalFloors.text = value;
+            break;
+          case 'bedrooms':
+            if (_bedrooms.text.trim().isEmpty) _bedrooms.text = value;
+            break;
+          case 'living':
+            if (_living.text.trim().isEmpty) _living.text = value;
+            break;
+          case 'bath':
+            if (_bath.text.trim().isEmpty) _bath.text = value;
+            break;
+          case 'area':
+            if (_area.text.trim().isEmpty) _area.text = value;
+            break;
+          case 'price':
+            if (_price.text.trim().isEmpty) _price.text = value;
+            break;
+          case 'phone':
+            if (_phone.text.trim().isEmpty) _phone.text = value;
+            break;
+          case 'agent':
+            if (_agent.text.trim().isEmpty) _agent.text = value;
+            break;
+          case 'sourceUrl':
+            if (_sourceUrl.text.trim().isEmpty) _sourceUrl.text = value;
+            break;
+        }
+      }
 
-    final b = pick(RegExp(r'(\d+)\s*栋'));
-    if (b != null) _building.text = b;
+      applyGenericTextHeuristics(text, setIfEmpty);
 
-    final units = pick(RegExp(r'(?:总单元|共)\s*(\d+)\s*单元'));
-    if (units != null) _totalUnits.text = units;
+      if (RegExp(r'已看|看过').hasMatch(text)) {
+        _status = ViewStatus.viewed;
+      } else if (RegExp(r'感兴趣|意向').hasMatch(text)) {
+        _status = ViewStatus.interested;
+      } else if (RegExp(r'已定|已订|已下定').hasMatch(text)) {
+        _status = ViewStatus.booked;
+      } else if (RegExp(r'放弃|不考虑').hasMatch(text)) {
+        _status = ViewStatus.abandoned;
+      }
 
-    final room = pick(RegExp(r'(\d{2,4})\s*(?:室|房号)', caseSensitive: false)) ??
-        pick(RegExp(r'(?:房号)\s*[:：]\s*([A-Za-z0-9-]{2,10})', caseSensitive: false));
-    if (room != null) _room.text = room;
-
-    final floorSlash = RegExp(r'(?:楼层)?\s*(\d+)\s*/\s*(\d+)\s*层').firstMatch(text);
-    if (floorSlash != null) _totalFloors.text = floorSlash.group(2)!;
-
-    final rtm = RegExp(r'(\d)\s*室\s*(\d)\s*厅\s*(\d)\s*卫').firstMatch(text);
-    if (rtm != null) {
-      _bedrooms.text = rtm.group(1)!;
-      _living.text = rtm.group(2)!;
-      _bath.text = rtm.group(3)!;
+      final tagHits = _defaultTagList.where((t) => text.contains(t)).toList();
+      if (tagHits.isNotEmpty) {
+        setState(() {
+          _selectedTags = {..._selectedTags, ...tagHits}.toList();
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _shareParsing = false;
+          _hasChanges = true;
+        });
+      }
     }
-
-    final ar = pick(RegExp(r'(\d+(?:\.\d+)?)\s*(?:㎡|m²|平米|平方)', caseSensitive: false));
-    if (ar != null) _area.text = ar;
-
-    final pr = pick(RegExp(r'(?:总价|售价|价格|租金)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?\s*(?:万|元/月|元))', caseSensitive: false));
-    if (pr != null) _price.text = pr;
-
-    final phone = pick(RegExp(r'(1[3-9]\d{9})'));
-    if (phone != null) _phone.text = phone;
-
-    final agent = pick(RegExp(r'(?:经纪人|联系人|置业顾问)\s*[:：]?\s*([^\s，。,；;]{2,10})', caseSensitive: false));
-    if (agent != null) _agent.text = agent;
-
-    if (RegExp(r'已看|看过').hasMatch(text)) {
-      _status = ViewStatus.viewed;
-    } else if (RegExp(r'感兴趣|意向').hasMatch(text)) {
-      _status = ViewStatus.interested;
-    } else if (RegExp(r'已定|已订|已下定').hasMatch(text)) {
-      _status = ViewStatus.booked;
-    } else if (RegExp(r'放弃|不考虑').hasMatch(text)) {
-      _status = ViewStatus.abandoned;
-    }
-
-    final tagHits = _defaultTagList.where((t) => text.contains(t)).toList();
-    if (tagHits.isNotEmpty) {
-      setState(() {
-        _selectedTags = {..._selectedTags, ...tagHits}.toList();
-      });
-    }
-
-    setState(() => _hasChanges = true);
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已尝试解析并填充字段')));
   }
 
@@ -3267,7 +3316,7 @@ class _EditPageState extends State<EditPage> {
                   title: '分享内容自动解析',
                   children: [
                     const Text(
-                      '粘贴房源分享链接或文本，支持自动提取小区、户型、面积、价格、联系人等信息',
+                      '粘贴安居客、贝壳等分享文案，将解析户型/面积/价格并尝试拉取详情页补充；支持链接紧接在文字后（无空格）',
                       style: TextStyle(color: _textSecondary, fontSize: 13, height: 1.45),
                     ),
                     const SizedBox(height: 12),
@@ -3285,11 +3334,17 @@ class _EditPageState extends State<EditPage> {
                         borderRadius: BorderRadius.circular(999),
                         child: InkWell(
                           borderRadius: BorderRadius.circular(999),
-                          onTap: _applyShareParse,
-                          child: const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 12),
+                          onTap: (_saving || _shareParsing) ? null : _applyShareParse,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
                             child: Center(
-                              child: Text('立即解析并填充', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14)),
+                              child: _shareParsing
+                                  ? const SizedBox(
+                                      width: 22,
+                                      height: 22,
+                                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                    )
+                                  : const Text('立即解析并填充', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14)),
                             ),
                           ),
                         ),
