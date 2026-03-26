@@ -17,6 +17,7 @@ import 'package:house_viewing_diary_flutter/voice_note_dir_stub.dart'
     if (dart.library.io) 'package:house_viewing_diary_flutter/voice_note_dir_io.dart' as voice_note_dir;
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:just_audio/just_audio.dart';
@@ -27,6 +28,12 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 const _storageKey = 'house_viewings_flutter';
 const _tagsStorageKey = 'house_viewing_tags_flutter';
+const _archivesIndexStorageKey = 'house_viewings_flutter_archives_index';
+const _activeArchiveIdStorageKey = 'house_viewings_flutter_active_archive_id';
+
+String _archiveDataKey(String archiveId) => 'house_viewings_flutter__archive__$archiveId';
+String _archiveTagsKey(String archiveId) => 'house_viewing_tags_flutter__archive__$archiveId';
+
 /// 与 RN `client/constants/theme.ts` light 主题对齐
 const _bgRoot = Color(0xFFF0F0F3);
 const _bgTertiary = Color(0xFFE8E8EB);
@@ -304,6 +311,14 @@ class ViewingHistoryEntry {
       status: ViewStatus.pending,
     );
   }
+}
+
+/// 某一天内的“看房记录 + 所属房源”，用于日历点击后的聚合列表。
+class ViewingHistoryInHouse {
+  const ViewingHistoryInHouse({required this.house, required this.entry});
+
+  final HouseViewing house;
+  final ViewingHistoryEntry entry;
 }
 
 List<ViewingHistoryEntry> _parseViewingHistoryFromJson(Map<String, dynamic> json) {
@@ -668,6 +683,443 @@ class GlobalTagStore {
   }
 }
 
+class DataArchiveMeta {
+  DataArchiveMeta({
+    required this.id,
+    required this.name,
+    required this.createdAt,
+    required this.itemCount,
+  });
+
+  final String id;
+  final String name;
+  final DateTime createdAt;
+  final int itemCount;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'createdAt': createdAt.toIso8601String(),
+        'itemCount': itemCount,
+      };
+
+  static DataArchiveMeta fromJson(Map<String, dynamic> json) {
+    return DataArchiveMeta(
+      id: json['id']?.toString() ?? '',
+      name: json['name']?.toString() ?? '未命名归档',
+      createdAt: DateTime.tryParse(json['createdAt']?.toString() ?? '') ?? DateTime.now(),
+      itemCount: (json['itemCount'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+class DataArchiveStore {
+  static final _uuid = Uuid();
+
+  static Future<List<DataArchiveMeta>> listArchives() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_archivesIndexStorageKey);
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      final arr = jsonDecode(raw) as List<dynamic>;
+      final list = arr.map((e) => DataArchiveMeta.fromJson(e as Map<String, dynamic>)).where((e) => e.id.isNotEmpty).toList();
+      list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      return list;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<String?> getActiveArchiveId() async {
+    final prefs = await SharedPreferences.getInstance();
+    final id = prefs.getString(_activeArchiveIdStorageKey);
+    return (id == null || id.trim().isEmpty) ? null : id.trim();
+  }
+
+  static Future<void> setActiveArchiveId(String? id) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (id == null || id.trim().isEmpty) {
+      await prefs.remove(_activeArchiveIdStorageKey);
+      return;
+    }
+    await prefs.setString(_activeArchiveIdStorageKey, id.trim());
+  }
+
+  /// 归档当前数据：拷贝到新 key，并清空当前 key（避免触发 seed 数据）
+  static Future<DataArchiveMeta> archiveCurrent({required String name}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final n = name.trim().isEmpty ? '归档-${DateFormat('yyyyMMdd-HHmm').format(DateTime.now())}' : name.trim();
+
+    final currentDataRaw = prefs.getString(_storageKey) ?? '[]';
+    final currentTagsRaw = prefs.getString(_tagsStorageKey); // 允许为空：为空则恢复时也为空（默认 tags）
+
+    int itemCount = 0;
+    try {
+      itemCount = (jsonDecode(currentDataRaw) as List<dynamic>).length;
+    } catch (_) {
+      itemCount = 0;
+    }
+
+    final id = _uuid.v4();
+    await prefs.setString(_archiveDataKey(id), currentDataRaw.isEmpty ? '[]' : currentDataRaw);
+    if (currentTagsRaw != null) {
+      await prefs.setString(_archiveTagsKey(id), currentTagsRaw);
+    } else {
+      await prefs.remove(_archiveTagsKey(id));
+    }
+
+    final meta = DataArchiveMeta(id: id, name: n, createdAt: DateTime.now(), itemCount: itemCount);
+    final existing = await listArchives();
+    final next = [meta, ...existing.where((e) => e.id != id)].map((e) => e.toJson()).toList();
+    await prefs.setString(_archivesIndexStorageKey, jsonEncode(next));
+
+    // 清空当前数据：用 [] 避免 readAll 走 seedData
+    await prefs.setString(_storageKey, '[]');
+    await prefs.remove(_tagsStorageKey);
+    await setActiveArchiveId(null);
+    return meta;
+  }
+
+  /// 将归档切换为“当前数据”（覆盖当前数据；归档本身保留不变）
+  static Future<void> restoreToCurrent(String archiveId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final dataRaw = prefs.getString(_archiveDataKey(archiveId)) ?? '[]';
+    final tagsRaw = prefs.getString(_archiveTagsKey(archiveId));
+    await prefs.setString(_storageKey, dataRaw.isEmpty ? '[]' : dataRaw);
+    if (tagsRaw == null) {
+      await prefs.remove(_tagsStorageKey);
+    } else {
+      await prefs.setString(_tagsStorageKey, tagsRaw);
+    }
+    await setActiveArchiveId(archiveId);
+  }
+
+  static Future<void> deleteArchive(String archiveId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_archiveDataKey(archiveId));
+    await prefs.remove(_archiveTagsKey(archiveId));
+    final list = await listArchives();
+    final next = list.where((e) => e.id != archiveId).map((e) => e.toJson()).toList();
+    await prefs.setString(_archivesIndexStorageKey, jsonEncode(next));
+    final active = await getActiveArchiveId();
+    if (active == archiveId) {
+      await setActiveArchiveId(null);
+    }
+  }
+}
+
+class CheckInSettingsPage extends StatefulWidget {
+  const CheckInSettingsPage({super.key});
+
+  @override
+  State<CheckInSettingsPage> createState() => _CheckInSettingsPageState();
+}
+
+class _CheckInSettingsPageState extends State<CheckInSettingsPage> {
+  late Future<PackageInfo> _pkgFuture;
+  late Future<List<DataArchiveMeta>> _archivesFuture;
+  late Future<String?> _activeArchiveFuture;
+  late Future<int> _currentCountFuture;
+  static const String _developerInfoText = 'by：沐乙师傅还不收工-有点草率杂货铺出品';
+
+  @override
+  void initState() {
+    super.initState();
+    _pkgFuture = PackageInfo.fromPlatform();
+    _reload();
+  }
+
+  void _reload() {
+    _archivesFuture = DataArchiveStore.listArchives();
+    _activeArchiveFuture = DataArchiveStore.getActiveArchiveId();
+    _currentCountFuture = _readCurrentCount();
+    if (mounted) setState(() {});
+  }
+
+  Future<int> _readCurrentCount() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_storageKey) ?? '[]';
+    try {
+      return (jsonDecode(raw) as List<dynamic>).length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<void> _createArchive() async {
+    final controller = TextEditingController();
+    final name = await showDialog<String?>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('归档当前数据', style: TextStyle(fontWeight: FontWeight.w800)),
+          content: TextField(
+            controller: controller,
+            decoration: const InputDecoration(
+              hintText: '给归档取个名字（如：上海-小王 / 北京-2026春）',
+            ),
+            autofocus: true,
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, null), child: const Text('取消')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, controller.text), child: const Text('确认归档')),
+          ],
+        );
+      },
+    );
+    if (name == null) return;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('确认归档并清空当前数据？', style: TextStyle(fontWeight: FontWeight.w800)),
+          content: const Text('归档后：当前看房记录会被清空（归档数据仍保留）。你可以随时从归档切换回来，实现多城市/多用户使用。'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('继续')),
+          ],
+        );
+      },
+    );
+    if (ok != true) return;
+
+    await DataArchiveStore.archiveCurrent(name: name);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已归档并清空当前数据')));
+    _reload();
+  }
+
+  Future<void> _switchToArchive(DataArchiveMeta meta) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('切换到该归档？', style: TextStyle(fontWeight: FontWeight.w800)),
+          content: Text('将用“${meta.name}”覆盖当前数据（归档本身不会删除）。建议先把当前数据再归档一次，避免覆盖丢失。'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('切换')),
+          ],
+        );
+      },
+    );
+    if (ok != true) return;
+    await DataArchiveStore.restoreToCurrent(meta.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已切换到归档：${meta.name}')));
+    _reload();
+  }
+
+  Future<void> _deleteArchive(DataArchiveMeta meta) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('删除归档？', style: TextStyle(fontWeight: FontWeight.w800)),
+          content: Text('将永久删除“${meta.name}”（包含其看房记录与标签）。此操作不可恢复。'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('删除')),
+          ],
+        );
+      },
+    );
+    if (ok != true) return;
+    await DataArchiveStore.deleteArchive(meta.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已删除归档：${meta.name}')));
+    _reload();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomSafe = MediaQuery.of(context).padding.bottom;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('打卡设置', style: TextStyle(fontWeight: FontWeight.w800)),
+      ),
+      body: ListView(
+        padding: EdgeInsets.fromLTRB(20, 12, 20, bottomSafe + 24),
+        children: [
+          Container(
+            decoration: _neuOuter(),
+            child: Container(
+              decoration: _neuInner(),
+              padding: const EdgeInsets.all(18),
+              child: Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: Image.asset(
+                      'assets/images/logo.jpg',
+                      width: 64,
+                      height: 64,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) => const SizedBox(width: 64, height: 64),
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: FutureBuilder<PackageInfo>(
+                      future: _pkgFuture,
+                      builder: (context, snapshot) {
+                        final ver = snapshot.data == null ? '-' : '${snapshot.data!.version}+${snapshot.data!.buildNumber}';
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('看房日记', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: _textPrimary)),
+                            const SizedBox(height: 6),
+                            Text('版本：$ver', style: const TextStyle(color: _textSecondary, fontWeight: FontWeight.w700)),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Container(
+            decoration: _neuOuter(),
+            child: Container(
+              decoration: _neuInner(),
+              padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('数据管理', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _textPrimary)),
+                  const SizedBox(height: 10),
+                  FutureBuilder<int>(
+                    future: _currentCountFuture,
+                    builder: (context, snap) {
+                      final c = snap.data ?? 0;
+                      return Text('当前数据条数：$c', style: const TextStyle(color: _textSecondary, fontWeight: FontWeight.w700));
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _createArchive,
+                          icon: const Icon(Icons.archive_outlined),
+                          label: const Text('归档当前数据', maxLines: 1, overflow: TextOverflow.ellipsis),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _reload,
+                          icon: const Icon(Icons.refresh_rounded),
+                          label: const Text('刷新'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  FutureBuilder<List<DataArchiveMeta>>(
+                    future: _archivesFuture,
+                    builder: (context, snapshot) {
+                      final list = snapshot.data ?? const <DataArchiveMeta>[];
+                      if (list.isEmpty) {
+                        return const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: Text('暂无归档。你可以先归档一次，用于多城市/多用户切换。', style: TextStyle(color: _textMuted)),
+                        );
+                      }
+                      return FutureBuilder<String?>(
+                        future: _activeArchiveFuture,
+                        builder: (context, activeSnap) {
+                          final activeId = activeSnap.data;
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              const SizedBox(height: 6),
+                              const Text('归档列表', style: TextStyle(fontWeight: FontWeight.w800, color: _textPrimary)),
+                              const SizedBox(height: 8),
+                              for (final a in list)
+                                Container(
+                                  margin: const EdgeInsets.only(bottom: 10),
+                                  decoration: BoxDecoration(
+                                    color: _bgRoot,
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(color: _borderLight),
+                                  ),
+                                  child: ListTile(
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                                    leading: CircleAvatar(
+                                      backgroundColor: (a.id == activeId) ? const Color(0x226C63FF) : _bgTertiary,
+                                      child: Icon((a.id == activeId) ? Icons.check_circle : Icons.archive, color: _primary),
+                                    ),
+                                    title: Text(a.name, style: const TextStyle(fontWeight: FontWeight.w800)),
+                                    subtitle: Text(
+                                      '${DateFormat('yyyy-MM-dd HH:mm').format(a.createdAt)} · ${a.itemCount} 条',
+                                      style: const TextStyle(color: _textSecondary, fontSize: 12),
+                                    ),
+                                    trailing: Wrap(
+                                      spacing: 6,
+                                      children: [
+                                        IconButton(
+                                          tooltip: '切换',
+                                          onPressed: () => _switchToArchive(a),
+                                          icon: const Icon(Icons.swap_horiz_rounded),
+                                        ),
+                                        IconButton(
+                                          tooltip: '删除',
+                                          onPressed: () => _deleteArchive(a),
+                                          icon: const Icon(Icons.delete_outline_rounded, color: _errorColor),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(builder: (_) => const StatsWechatArticlePage()),
+                );
+              },
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                child: Center(
+                  child: Text(
+                    _developerInfoText,
+                    style: TextStyle(
+                      color: _textSecondary,
+                      fontSize: 12,
+                      height: 1.4,
+                      decoration: TextDecoration.underline,
+                      decorationColor: _textMuted,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class RootPage extends StatefulWidget {
   const RootPage({super.key});
 
@@ -756,6 +1208,21 @@ class _HomePageState extends State<HomePage> {
     return DateTime(now.year, now.month + (page - _kCalendarOrigin), 1);
   }
 
+  bool _isSameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
+
+  List<ViewingHistoryInHouse> _recordsForDay(DateTime day) {
+    final out = <ViewingHistoryInHouse>[];
+    for (final h in _items) {
+      for (final e in h.viewingHistory) {
+        if (_isSameDay(e.viewedAt, day)) {
+          out.add(ViewingHistoryInHouse(house: h, entry: e));
+        }
+      }
+    }
+    out.sort((a, b) => b.entry.viewedAt.compareTo(a.entry.viewedAt));
+    return out;
+  }
+
   Widget _buildMonthHeatGrid(DateTime month) {
     final firstDay = DateTime(month.year, month.month, 1);
     final totalDays = DateTime(month.year, month.month + 1, 0).day;
@@ -789,20 +1256,36 @@ class _HomePageState extends State<HomePage> {
         children: [
           for (int i = 0; i < startWeekday; i++) const SizedBox(width: 34, height: 34),
           for (int day = 1; day <= totalDays; day++)
-            Container(
-              width: 34,
-              height: 34,
-              decoration: BoxDecoration(
-                color: heatColor(countMap[day] ?? 0),
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
                 borderRadius: BorderRadius.circular(8),
-              ),
-              alignment: Alignment.center,
-              child: Text(
-                '$day',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: (countMap[day] ?? 0) > 0 ? Colors.white : _textMuted,
+                onTap: () async {
+                  final cellDate = DateTime(month.year, month.month, day);
+                  final records = _recordsForDay(cellDate);
+                  await Navigator.push<void>(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => DailyViewingHistoryPage(date: cellDate, records: records),
+                    ),
+                  );
+                },
+                child: Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: heatColor(countMap[day] ?? 0),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    '$day',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: (countMap[day] ?? 0) > 0 ? Colors.white : _textMuted,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -952,14 +1435,28 @@ class _HomePageState extends State<HomePage> {
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.asset(
-                    'assets/images/logo.jpg',
-                    width: 48,
-                    height: 48,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const SizedBox(width: 48, height: 48),
+                Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () async {
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute<void>(builder: (_) => const CheckInSettingsPage()),
+                      );
+                      if (!mounted) return;
+                      await _reload();
+                    },
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.asset(
+                        'assets/images/logo.jpg',
+                        width: 48,
+                        height: 48,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) => const SizedBox(width: 48, height: 48),
+                      ),
+                    ),
                   ),
                 ),
                 const SizedBox(width: 14),
@@ -1165,9 +1662,11 @@ class _HomePageState extends State<HomePage> {
 }
 
 class DetailPage extends StatefulWidget {
-  const DetailPage({super.key, required this.item});
+  const DetailPage({super.key, required this.item, this.initialTabIndex});
 
   final HouseViewing item;
+  /// 0=房源信息, 1=看房记录
+  final int? initialTabIndex;
 
   @override
   State<DetailPage> createState() => _DetailPageState();
@@ -1211,6 +1710,7 @@ class _DetailPageState extends State<DetailPage> {
   @override
   Widget build(BuildContext context) {
     final item = _item;
+    final initIndex = widget.initialTabIndex == 1 ? 1 : 0;
     Widget iconCircle({
       required IconData icon,
       required Color bg,
@@ -1293,6 +1793,7 @@ class _DetailPageState extends State<DetailPage> {
 
     return DefaultTabController(
       length: 2,
+      initialIndex: initIndex,
       child: Scaffold(
         backgroundColor: _bgRoot,
         body: SafeArea(
@@ -1741,6 +2242,211 @@ class _DetailPageState extends State<DetailPage> {
         ),
       ),
     ),
+    );
+  }
+}
+
+/// 点击日历某一天后展示“当天看房记录”的聚合列表。
+class DailyViewingHistoryPage extends StatelessWidget {
+  const DailyViewingHistoryPage({super.key, required this.date, required this.records});
+
+  final DateTime date;
+  final List<ViewingHistoryInHouse> records;
+
+  @override
+  Widget build(BuildContext context) {
+    final dateStr = DateFormat('yyyy-MM-dd').format(date);
+
+    final Map<String, List<ViewingHistoryInHouse>> byHouse = {};
+    final Map<String, HouseViewing> houseById = {};
+    for (final r in records) {
+      byHouse.putIfAbsent(r.house.id, () => <ViewingHistoryInHouse>[]).add(r);
+      houseById[r.house.id] = r.house;
+    }
+
+    final houseIds = byHouse.keys.toList()
+      ..sort((a, b) {
+        final latestA = byHouse[a]!.map((e) => e.entry.viewedAt).reduce((x, y) => x.isAfter(y) ? x : y);
+        final latestB = byHouse[b]!.map((e) => e.entry.viewedAt).reduce((x, y) => x.isAfter(y) ? x : y);
+        return latestB.compareTo(latestA);
+      });
+
+    Widget iconCircle({
+      required IconData icon,
+      required Color bg,
+      required Color iconColor,
+      required VoidCallback onTap,
+    }) {
+      return InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+          alignment: Alignment.center,
+          child: Icon(icon, size: 18, color: iconColor),
+        ),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: _bgRoot,
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+              child: Row(
+                children: [
+                  iconCircle(
+                    icon: Icons.arrow_back_rounded,
+                    bg: _bgTertiary,
+                    iconColor: _textPrimary,
+                    onTap: () => Navigator.pop(context),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '看房记录 · $dateStr',
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: _textPrimary),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: records.isEmpty
+                  ? const Center(
+                      child: Text(
+                        '当天暂无看房记录',
+                        style: TextStyle(color: _textMuted, fontSize: 15, height: 1.5, fontWeight: FontWeight.w600),
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+                      itemCount: houseIds.length,
+                      itemBuilder: (context, index) {
+                        final houseId = houseIds[index];
+                        final house = houseById[houseId]!;
+                        final list = [...byHouse[houseId]!]
+                          ..sort((a, b) => b.entry.viewedAt.compareTo(a.entry.viewedAt));
+
+                        final latest = list.first.entry.viewedAt;
+                        final showCount = list.length > 8 ? 8 : list.length;
+                        final shown = list.take(showCount).toList();
+
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 14),
+                          decoration: _neuOuter(),
+                          child: Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(24),
+                              onTap: () {
+                                Navigator.push<void>(
+                                  context,
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => DetailPage(item: house, initialTabIndex: 1),
+                                  ),
+                                );
+                              },
+                              child: Container(
+                                decoration: _neuInner(),
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            house.communityName,
+                                            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: _textPrimary),
+                                          ),
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: house.status.bgColor,
+                                            borderRadius: BorderRadius.circular(999),
+                                          ),
+                                          child: Text(
+                                            '${list.length}条',
+                                            style: TextStyle(color: house.status.color, fontWeight: FontWeight.w700, fontSize: 12),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      '最新：${DateFormat('HH:mm').format(latest)}',
+                                      style: TextStyle(color: _textSecondary, fontSize: 13, fontWeight: FontWeight.w600),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    for (final r in shown) ...[
+                                      Row(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  DateFormat('HH:mm').format(r.entry.viewedAt),
+                                                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: _textPrimary),
+                                                ),
+                                                const SizedBox(height: 4),
+                                                if ((r.entry.comment ?? '').trim().isNotEmpty)
+                                                  Text(
+                                                    r.entry.comment!.trim(),
+                                                    maxLines: 2,
+                                                    overflow: TextOverflow.ellipsis,
+                                                    style: TextStyle(color: _textSecondary, fontSize: 13, height: 1.4),
+                                                  )
+                                                else
+                                                  Text(
+                                                    r.entry.status.label,
+                                                    style: TextStyle(color: _textMuted, fontSize: 13, fontWeight: FontWeight.w600),
+                                                  ),
+                                              ],
+                                            ),
+                                          ),
+                                          const SizedBox(width: 10),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                            decoration: BoxDecoration(
+                                              color: r.entry.status.bgColor,
+                                              borderRadius: BorderRadius.circular(999),
+                                            ),
+                                            child: Text(
+                                              r.entry.status.label,
+                                              style: TextStyle(color: r.entry.status.color, fontWeight: FontWeight.w700, fontSize: 12),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 10),
+                                    ],
+                                    if (list.length > showCount)
+                                      Text(
+                                        '+${list.length - showCount} 条更多',
+                                        style: TextStyle(color: _textMuted, fontSize: 13, fontWeight: FontWeight.w600),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -4628,7 +5334,7 @@ class _MapPageState extends State<MapPage> with AutomaticKeepAliveClientMixin {
                             children: [
                               ValueListenableBuilder<bool>(
                                 valueListenable: _showMarkerCard,
-                                builder: (_, showCard, __) => Icon(
+                                builder: (context, showCard, child) => Icon(
                                   showCard ? Icons.credit_card : Icons.credit_card_off_outlined,
                                   size: 20,
                                   color: showCard ? _primary : _textMuted,
@@ -4637,7 +5343,7 @@ class _MapPageState extends State<MapPage> with AutomaticKeepAliveClientMixin {
                               const SizedBox(width: 6),
                               ValueListenableBuilder<bool>(
                                 valueListenable: _showMarkerCard,
-                                builder: (_, showCard, __) => Text(
+                                builder: (context, showCard, child) => Text(
                                   showCard ? '卡片' : '无卡片',
                                   style: TextStyle(
                                     fontSize: 13,
