@@ -820,6 +820,117 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  /// 列表页“房源状态”快捷修改：底部抽屉直接更新，不进入编辑页
+  Future<void> _openStatusDrawer(HouseViewing item) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      isDismissible: true,
+      barrierColor: Colors.transparent,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final h = MediaQuery.sizeOf(ctx).height;
+        return Align(
+          alignment: Alignment.bottomCenter,
+          child: Material(
+            color: _bgRoot,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+            clipBehavior: Clip.antiAlias,
+            child: SizedBox(
+              height: h * 0.42,
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(6, 10, 6, 4),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            '房源状态',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: _textPrimary),
+                          ),
+                        ),
+                        const SizedBox(width: 64),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1, color: _borderLight),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '当前状态：${item.status.label}',
+                            style: const TextStyle(fontWeight: FontWeight.w800, color: _textSecondary),
+                          ),
+                          const SizedBox(height: 14),
+                          Expanded(
+                            child: Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: ViewStatus.values.map((s) {
+                                final on = item.status == s;
+                                return Material(
+                                  color: Colors.transparent,
+                                  child: InkWell(
+                                    borderRadius: BorderRadius.circular(999),
+                                    onTap: () async {
+                                      final all = await HouseViewingStore.readAll();
+                                      final idx = all.indexWhere((e) => e.id == item.id);
+                                      if (idx < 0) return;
+                                      all[idx] = all[idx].copyWith(status: s);
+                                      await HouseViewingStore.saveAll(all);
+                                      if (ctx.mounted) Navigator.pop(ctx);
+                                    },
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                      decoration: BoxDecoration(
+                                        color: on ? s.bgColor : _bgTertiary,
+                                        borderRadius: BorderRadius.circular(999),
+                                        border: Border.all(color: on ? Colors.transparent : const Color(0x99FFFFFF)),
+                                      ),
+                                      child: Text(
+                                        s.label,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w700,
+                                          color: on ? s.color : _textSecondary,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                        ],
+                      ),
+                    ),
+                  ),
+                  // 抽屉内部“空白区域”点击关闭：放在内容下方留出一条可点区域
+                  SizedBox(
+                    height: 14,
+                    child: InkWell(
+                      onTap: () => Navigator.pop(ctx),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    if (!mounted) return;
+    await _reload();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const Center(child: CircularProgressIndicator());
@@ -980,6 +1091,13 @@ class _HomePageState extends State<HomePage> {
                       );
                       _reload();
                     },
+                    onLongPress: () async {
+                      await Navigator.push<void>(
+                        context,
+                        MaterialPageRoute<void>(builder: (_) => AddViewingHistoryPage(house: item)),
+                      );
+                      _reload();
+                    },
                     child: Container(
                       decoration: _neuInner(),
                       padding: const EdgeInsets.all(18),
@@ -994,10 +1112,20 @@ class _HomePageState extends State<HomePage> {
                                   style: const TextStyle(color: _textPrimary, fontSize: 18, fontWeight: FontWeight.w700),
                                 ),
                               ),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                decoration: BoxDecoration(color: item.status.bgColor, borderRadius: BorderRadius.circular(999)),
-                                child: Text(item.status.label, style: TextStyle(color: item.status.color, fontSize: 12, fontWeight: FontWeight.w600)),
+                              Material(
+                                color: Colors.transparent,
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(999),
+                                  onTap: () => _openStatusDrawer(item),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(color: item.status.bgColor, borderRadius: BorderRadius.circular(999)),
+                                    child: Text(
+                                      item.status.label,
+                                      style: TextStyle(color: item.status.color, fontSize: 12, fontWeight: FontWeight.w600),
+                                    ),
+                                  ),
+                                ),
                               ),
                             ],
                           ),
@@ -1455,7 +1583,16 @@ class _DetailPageState extends State<DetailPage> {
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
                   child: InkWell(
-                    onTap: () => launchUrl(Uri.parse(item.sourceUrl!.trim())),
+                    onTap: () {
+                      final url = item.sourceUrl!.trim();
+                      if (url.isEmpty) return;
+                      Navigator.push<void>(
+                        context,
+                        MaterialPageRoute<void>(
+                          builder: (_) => ShareSourceInAppWebViewPage(url: url),
+                        ),
+                      );
+                    },
                     child: Row(
                       children: [
                         const Icon(Icons.link, size: 18, color: _primary),
@@ -3129,6 +3266,8 @@ class _EditPageState extends State<EditPage> {
                       initialLng: initialLng,
                       initialLat: initialLat,
                       initialAddress: _locationText.text,
+                      // 未设置地点时，默认用“小区名称”自动触发搜索
+                      initialSearchKeyword: _locationText.text.trim().isEmpty ? _community.text.trim() : '',
                       onPicked: (lat, lng, text, communityName) {
                         Navigator.pop(ctx);
                         if (!mounted) return;
@@ -3941,6 +4080,112 @@ class _StatsPageState extends State<StatsPage> {
   }
 }
 
+/// 房源详情页“打开原分享链接”的内置 WebView（同时提供“浏览器打开”悬浮按钮）
+class ShareSourceInAppWebViewPage extends StatefulWidget {
+  const ShareSourceInAppWebViewPage({super.key, required this.url});
+
+  final String url;
+
+  @override
+  State<ShareSourceInAppWebViewPage> createState() => _ShareSourceInAppWebViewPageState();
+}
+
+class _ShareSourceInAppWebViewPageState extends State<ShareSourceInAppWebViewPage> {
+  late final WebViewController _controller;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    final uri = Uri.tryParse(widget.url.trim());
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onNavigationRequest: (request) {
+            final u = Uri.tryParse(request.url);
+            if (u == null) return NavigationDecision.prevent;
+            if (u.scheme == 'http' || u.scheme == 'https') {
+              return NavigationDecision.navigate;
+            }
+            // 非 http/https（如 tel/mailto）交给系统处理
+            unawaited(launchUrl(u, mode: LaunchMode.externalApplication));
+            return NavigationDecision.prevent;
+          },
+          onPageFinished: (_) {
+            if (mounted) setState(() => _loading = false);
+          },
+        ),
+      );
+    if (uri != null) {
+      _controller.loadRequest(uri);
+    } else {
+      _loading = false;
+    }
+  }
+
+  Future<void> _openInBrowser() async {
+    final uri = Uri.tryParse(widget.url.trim());
+    if (uri == null) return;
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = MediaQuery.sizeOf(context).height;
+    return Scaffold(
+      backgroundColor: _bgRoot,
+      appBar: AppBar(
+        title: const Text('原始分享链接', style: TextStyle(fontWeight: FontWeight.w800)),
+      ),
+      body: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          WebViewWidget(controller: _controller),
+          if (_loading) const Center(child: CircularProgressIndicator()),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: h * 0.18,
+            child: Center(
+              child: Material(
+                color: Colors.white.withValues(alpha: 0.94),
+                elevation: 1,
+                shadowColor: Colors.black26,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(999),
+                  side: BorderSide(color: _primary.withValues(alpha: 0.25)),
+                ),
+                child: InkWell(
+                  onTap: _openInBrowser,
+                  borderRadius: BorderRadius.circular(999),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.open_in_new_rounded, color: _primary),
+                        SizedBox(width: 8),
+                        Text(
+                          '浏览器打开',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            color: _primary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _MapPageData {
   _MapPageData({required this.items, this.userLatitude, this.userLongitude});
 
@@ -4159,6 +4404,49 @@ class _MapPageState extends State<MapPage> with AutomaticKeepAliveClientMixin {
     } catch (_) {}
   }
 
+  DateTime? _lastMapPickHandledAt;
+  bool _creatingFromMapPick = false;
+
+  Future<void> _createHouseFromMapPick({
+    required double lat,
+    required double lng,
+    required String locationText,
+    required String communityName,
+  }) async {
+    if (!mounted) return;
+    final now = DateTime.now();
+    if (_lastMapPickHandledAt != null && now.difference(_lastMapPickHandledAt!) < const Duration(seconds: 2)) return;
+    _lastMapPickHandledAt = now;
+    if (_creatingFromMapPick) return;
+    _creatingFromMapPick = true;
+    try {
+      final addr = locationText.trim();
+      final cname = communityName.trim();
+      final house = HouseViewing(
+        id: const Uuid().v4(),
+        communityName: cname.isNotEmpty ? cname : '新房源',
+        status: ViewStatus.pending,
+        createdAt: now,
+        latitude: lat,
+        longitude: lng,
+        locationText: addr.isNotEmpty ? addr : null,
+      );
+
+      final all = await HouseViewingStore.readAll();
+      all.add(house);
+      await HouseViewingStore.saveAll(all);
+
+      if (!mounted) return;
+      await Navigator.push<void>(
+        context,
+        MaterialPageRoute<void>(builder: (_) => EditPage(item: house)),
+      );
+      if (mounted) refreshMapData();
+    } finally {
+      _creatingFromMapPick = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -4237,6 +4525,16 @@ class _MapPageState extends State<MapPage> with AutomaticKeepAliveClientMixin {
                 markerPayload: payload,
                 centerLongitude: centerLng,
                 centerLatitude: centerLat,
+                onMapPick: (lat, lng, locationText, communityName) {
+                  unawaited(
+                    _createHouseFromMapPick(
+                      lat: lat,
+                      lng: lng,
+                      locationText: locationText,
+                      communityName: communityName,
+                    ),
+                  );
+                },
                 onMapLoadStarted: () {
                   if (mounted) setState(() => _mapTilesReady = false);
                 },
@@ -4309,8 +4607,8 @@ class _MapPageState extends State<MapPage> with AutomaticKeepAliveClientMixin {
                   ),
                 if (key.isNotEmpty)
                   Positioned(
-                    top: 8,
                     right: 12,
+                    bottom: 72,
                     child: Material(
                       color: Colors.white.withValues(alpha: 0.94),
                       elevation: 1,

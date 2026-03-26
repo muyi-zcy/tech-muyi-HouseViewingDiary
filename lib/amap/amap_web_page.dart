@@ -41,6 +41,7 @@ class AmapHouseMapWebView extends StatefulWidget {
     required this.onOpenDetail,
     this.centerLongitude = 121.4737,
     this.centerLatitude = 31.2304,
+    this.onMapPick,
     this.onMapLoadStarted,
     this.onMapJsReady,
     this.onWebViewControllerCreated,
@@ -49,6 +50,9 @@ class AmapHouseMapWebView extends StatefulWidget {
   final String amapKey;
   final List<Map<String, dynamic>> markerPayload;
   final void Function(String id) onOpenDetail;
+
+  /// 地图点击回传（用于在地图页面“点选创建房源”）
+  final void Function(double lat, double lng, String locationText, String communityName)? onMapPick;
 
   /// 无房源标记时的地图中心（通常为当前定位）；有标记时脚本内会 setFitView。
   final double centerLongitude;
@@ -68,6 +72,7 @@ class _AmapHouseMapWebViewState extends State<AmapHouseMapWebView> {
   String _lastHtmlKey = '';
   String? _lastOpenedDetailId;
   DateTime? _lastOpenedDetailAt;
+  DateTime? _lastPickAt;
 
   String _htmlCacheKey() =>
       '${jsonEncode(widget.markerPayload)}_${widget.centerLongitude}_${widget.centerLatitude}_${widget.amapKey}_${getAmapSecurityJsCode()}';
@@ -128,6 +133,20 @@ class _AmapHouseMapWebViewState extends State<AmapHouseMapWebView> {
               _lastOpenedDetailId = id;
               _lastOpenedDetailAt = now;
               widget.onOpenDetail(id);
+            }
+            if (map['type'] == 'pick') {
+              final now = DateTime.now();
+              if (_lastPickAt != null && now.difference(_lastPickAt!) < const Duration(milliseconds: 1200)) {
+                return;
+              }
+              _lastPickAt = now;
+
+              final lng = (map['longitude'] as num?)?.toDouble();
+              final lat = (map['latitude'] as num?)?.toDouble();
+              if (lng == null || lat == null) return;
+              final locationText = map['location_text']?.toString() ?? '';
+              final communityName = map['community_name']?.toString() ?? '';
+              widget.onMapPick?.call(lat, lng, locationText, communityName);
             }
           } catch (_) {}
         },
@@ -274,6 +293,7 @@ class AmapPickerWebView extends StatefulWidget {
     required this.initialLng,
     required this.initialLat,
     required this.initialAddress,
+    this.initialSearchKeyword = '',
     required this.onPicked,
   });
 
@@ -281,6 +301,8 @@ class AmapPickerWebView extends StatefulWidget {
   final double initialLng;
   final double initialLat;
   final String initialAddress;
+  /// 搜索框初始关键字；用于“未设置地点时默认带小区名称搜索”
+  final String initialSearchKeyword;
   /// [communityName] 为逆地理提取的小区/社区名，用于回填「小区名称」。
   final void Function(double latitude, double longitude, String locationText, String communityName) onPicked;
 
@@ -306,6 +328,7 @@ class _AmapPickerWebViewState extends State<AmapPickerWebView> {
         initialLng: widget.initialLng,
         initialLat: widget.initialLat,
         initialAddress: widget.initialAddress,
+        initialSearchKeyword: widget.initialSearchKeyword,
         securityJsCode: getAmapSecurityJsCode(),
       );
       final c = WebViewController()
